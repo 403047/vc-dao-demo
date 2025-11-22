@@ -221,7 +221,41 @@ class AutoExecutor {
             }
 
             if (!holders.length) {
-                console.log('⚠️ No holders from explorer; skipping eligible sync');
+                console.log('🔎 Explorer returned no holders. Falling back to on-chain Transfer scan...');
+                try {
+                    const latest = await this.provider.getBlockNumber();
+                    const fromBlock = Math.max(0, latest - 100000);
+                    const transferIface = new ethers.utils.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+                    const filter = {
+                        address: tokenAddr,
+                        topics: [transferIface.getEventTopic('Transfer')],
+                        fromBlock,
+                        toBlock: latest
+                    };
+                    const logs = await this.provider.getLogs(filter);
+                    const addrSet = new Set();
+                    for (const l of logs) {
+                        try {
+                            const parsed = transferIface.parseLog(l);
+                            const to = parsed.args.to;
+                            if (to && to !== ethers.constants.AddressZero) addrSet.add(to.toLowerCase());
+                        } catch {}
+                    }
+                    const uniqueAddrs = Array.from(addrSet);
+                    const balances = await Promise.all(uniqueAddrs.map(async (a) => {
+                        try {
+                            const b = await this.contracts.token.balanceOf(a);
+                            return { address: a, balance: parseFloat(ethers.utils.formatUnits(b, decimals)) };
+                        } catch { return { address: a, balance: 0 }; }
+                    }));
+                    holders = balances.filter(b => b.balance > 0);
+                } catch (scanErr) {
+                    console.error('Transfer scan failed:', scanErr.message || scanErr);
+                }
+            }
+
+            if (!holders.length) {
+                console.log('⚠️ No holders discovered; skipping eligible sync');
                 return;
             }
 

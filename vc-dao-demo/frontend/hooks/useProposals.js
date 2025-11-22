@@ -97,16 +97,10 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
 
   const loadVoteEvents = useCallback(async (governorContract, proposalList = null) => {
     try {
-      const contract = (() => {
-        try {
-          if (governorContract) return governorContract;
-        } catch {}
-        try {
-          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
-          return new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, ro);
-        } catch {}
-        return governorContract;
-      })();
+      const provider = (typeof window !== 'undefined' && window.ethereum)
+        ? new ethers.providers.Web3Provider(window.ethereum)
+        : new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+      const contract = new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, provider);
       if (!contract) return;
 
       const targets = Array.isArray(proposalList) && proposalList.length > 0 ? proposalList : proposals;
@@ -128,17 +122,10 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
 
   const loadProposals = useCallback(async (governorContract) => {
     try {
-      const reader = (() => {
-        try {
-          if (governorContract) return governorContract;
-        } catch {}
-        try {
-          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
-          return new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, ro);
-        } catch {}
-        return governorContract;
-      })();
-      if (!reader) return;
+      const provider = (typeof window !== 'undefined' && window.ethereum)
+        ? new ethers.providers.Web3Provider(window.ethereum)
+        : new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+      const reader = new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, provider);
       const count = await reader.proposalCount();
       const total = parseInt(count.toString(), 10);
       const loaded = [];
@@ -213,7 +200,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
         
       }
       
-      if (loaded.length === 0 && governorContract) {
+      if (loaded.length === 0) {
         try {
           const rc = await reader.proposalCount();
           const rtotal = parseInt(rc.toString(), 10);
@@ -940,66 +927,93 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
     
     setIsLoading(true);
     try {
-      // Pre-checks to avoid on-chain reverts
-      try {
-        const already = await contracts.governor.hasVoted(proposalId, account);
-        if (already) {
-          setIsLoading(false);
-          setStatus('❌ Bạn đã vote đề xuất này rồi');
-          return;
-        }
-      } catch {}
+      // Pre-checks chạy song song với timeout ngắn để tránh lag
+      const quickGuard = (p, fallback = null, ms = 500) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve(fallback), ms))]);
+      const roProvider = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+      const roGovernor = new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, roProvider);
+      const roToken = contracts?.token ? new ethers.Contract(contracts.token.address, ['function balanceOf(address) view returns (uint256)'], roProvider) : null;
 
+      const localProposal = proposals.find(p => p.id === proposalId);
+
+      const [already, pData, bal] = await Promise.all([
+        quickGuard(contracts.governor.hasVoted(proposalId, account), false),
+        localProposal ? Promise.resolve(null) : quickGuard(roGovernor.getProposal(proposalId), null),
+        roToken ? quickGuard(roToken.balanceOf(account), null) : Promise.resolve(null)
+      ]);
+
+      if (already) {
+        setIsLoading(false);
+        setStatus('❌ Bạn đã vote đề xuất này rồi');
+        return;
+      }
+
+      // Dùng dữ liệu local nếu có, fallback pData từ chain
       try {
-        const pData = await contracts.governor.getProposal(proposalId);
-        const voteStart = parseInt(pData[6].toString(), 10);
-        const voteEnd = parseInt(pData[7].toString(), 10);
+        const voteStart = localProposal ? Math.floor((localProposal.voteStart instanceof Date ? localProposal.voteStart.getTime() : localProposal.voteStart) / 1000) : (pData ? parseInt(pData[6].toString(), 10) : null);
+        const voteEnd = localProposal ? Math.floor((localProposal.voteEnd instanceof Date ? localProposal.voteEnd.getTime() : localProposal.voteEnd) / 1000) : (pData ? parseInt(pData[7].toString(), 10) : null);
         const nowSec = Math.floor(Date.now() / 1000);
-        if (nowSec < voteStart) {
+        if (voteStart && nowSec < voteStart) {
           setIsLoading(false);
           setStatus('⏳ Voting chưa bắt đầu cho đề xuất này');
           return;
         }
-        if (nowSec > voteEnd) {
+        if (voteEnd && nowSec > voteEnd) {
           setIsLoading(false);
           setStatus('⏰ Voting đã kết thúc cho đề xuất này');
           return;
         }
       } catch {}
 
-      try {
-        // Ensure user has tokens
-        if (contracts?.token && account) {
-          const bal = await contracts.token.balanceOf(account);
-          if (bal.eq(0)) {
-            setIsLoading(false);
-            setStatus('⚠️ Bạn chưa sở hữu VCDAO nên không thể vote');
-            return;
-          }
-        }
-      } catch {}
+      if (bal && ethers.BigNumber.isBigNumber(bal) && bal.eq(0)) {
+        setIsLoading(false);
+        setStatus('⚠️ Bạn chưa sở hữu VCDAO nên không thể vote');
+        return;
+      }
 
-      // Simulate the vote to capture revert reason early
+      // Try simulate quickly; if timeout, proceed to send
+      let canSend = true;
       try {
-        await contracts.governor.callStatic.castVote(proposalId, support);
+        const sim = contracts.governor.callStatic.castVote(proposalId, support);
+        const res = await Promise.race([sim, new Promise((resolve) => setTimeout(() => resolve('timeout'), 500))]);
+        if (res !== 'timeout') canSend = true;
       } catch (simErr) {
         const msg = (simErr?.error?.message || simErr?.reason || simErr?.message || '').toLowerCase();
         if (msg.includes('already voted')) {
           setStatus('❌ Bạn đã vote đề xuất này rồi');
+          setIsLoading(false);
+          return;
         } else if (msg.includes('voting not started')) {
           setStatus('⏳ Voting chưa bắt đầu cho đề xuất này');
+          setIsLoading(false);
+          return;
         } else if (msg.includes('voting ended')) {
           setStatus('⏰ Voting đã kết thúc cho đề xuất này');
+          setIsLoading(false);
+          return;
         } else if (msg.includes('no tokens')) {
           setStatus('⚠️ Bạn chưa sở hữu VCDAO nên không thể vote');
-        } else {
-          setStatus('❌ Không thể gửi phiếu: giao dịch sẽ bị revert');
+          setIsLoading(false);
+          return;
         }
-        setIsLoading(false);
-        return;
+        // Otherwise allow to proceed
+        canSend = true;
       }
 
-      const tx = await contracts.governor.castVote(proposalId, support);
+      // Ensure MetaMask is unlocked and on correct network
+      try { await window.ethereum?.request?.({ method: 'eth_requestAccounts' }); } catch {}
+
+      // Estimate gas and set fixed gas price to avoid UNPREDICTABLE_GAS_LIMIT
+      let gasOpts = {};
+      try {
+        const est = await contracts.governor.estimateGas.castVote(proposalId, support);
+        const gp = ethers.utils.parseUnits('30', 'gwei');
+        gasOpts = { gasLimit: est.mul(12).div(10), gasPrice: gp };
+      } catch {
+        const gp = ethers.utils.parseUnits('30', 'gwei');
+        gasOpts = { gasLimit: ethers.BigNumber.from('200000'), gasPrice: gp };
+      }
+
+      const tx = await contracts.governor.castVote(proposalId, support, gasOpts);
       setStatus('Đang gửi phiếu...');
       await tx.wait();
       setStatus('Đã ghi nhận phiếu!');
@@ -1187,8 +1201,8 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
           const roToken = new ethers.Contract(contracts.token.address, ['function balanceOf(address) view returns (uint256)', 'function totalSupply() view returns (uint256)'], ro);
           const pBal = roToken.balanceOf(account);
           const pTs = roToken.totalSupply();
-          userTokenBalance = await Promise.race([pBal, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 1500))]);
-          totalSupply = await Promise.race([pTs, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 1500))]);
+          userTokenBalance = await Promise.race([pBal, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 700))]);
+          totalSupply = await Promise.race([pTs, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 700))]);
         } catch (fallbackErr) {
           throw fallbackErr;
         }
@@ -1218,7 +1232,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
     if (!targetProposal) return { canVote: false, reason: 'proposal_not_found', ownershipInfo: null };
     
     // Get ownership info
-    const timeoutMs = 1200;
+    const timeoutMs = 600;
     const guard = (p, fallback) => Promise.race([p, new Promise(resolve => setTimeout(() => resolve(fallback), timeoutMs))]);
     const ownershipInfo = await guard(getUserOwnership(), { percentage: 0, meetsMinimum: true, formattedPercentage: '0%' });
     
@@ -1255,7 +1269,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
             resolve(false);
           }
         });
-        const t = new Promise(resolve => setTimeout(() => resolve(false), 2500));
+        const t = new Promise(resolve => setTimeout(() => resolve(false), 700));
         const r = await Promise.race([p, t]);
         return Boolean(r);
       } catch {

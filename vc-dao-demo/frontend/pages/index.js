@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ethers } from 'ethers';
+import { CONTRACT_ADDRESSES, GOVERNOR_ABI, READONLY_PROVIDER_URL } from '../src/config/daoContracts';
 import StatusToast from '../components/StatusToast';
 import PermissionModal from '../components/PermissionModal';
 // Removed unused CONTRACT_ADDRESSES and ABIs from page-level
@@ -109,13 +110,26 @@ export default function Home() {
   const [governorOwner, setGovernorOwner] = useState(null);
   useEffect(() => {
     const loadGovernorOwner = async () => {
-      if (dao.contracts?.governor) {
-        try {
+      try {
+        const addr = CONTRACT_ADDRESSES.governor;
+        const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+        const code = await ro.getCode(addr);
+        if (code && code !== '0x') {
+          const reader = new ethers.Contract(addr, GOVERNOR_ABI, ro);
+          const owner = await reader.owner();
+          setGovernorOwner(owner);
+          return;
+        }
+      } catch (e1) {
+        console.error('Read-only owner fallback error:', e1);
+      }
+      try {
+        if (dao.contracts?.governor) {
           const owner = await dao.contracts.governor.owner();
           setGovernorOwner(owner);
-        } catch (e) {
-          console.error('Error loading governor owner:', e);
         }
+      } catch (e2) {
+        console.error('Error loading governor owner:', e2);
       }
     };
     loadGovernorOwner();
@@ -138,7 +152,7 @@ export default function Home() {
       await dao.refreshCflrBalance(dao.account);
       await loadTokenHolders(dao.contracts.token, activeTab);
     }
-  });
+  }, getCurrentRound);
   const [testWithdrawAmt, setTestWithdrawAmt] = useState('');
   const [showStatus, setShowStatus] = useState(true);
   const statusTimeoutRef = useRef(null);

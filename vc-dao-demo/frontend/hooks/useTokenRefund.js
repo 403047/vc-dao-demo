@@ -4,7 +4,7 @@ import { ethers } from 'ethers';
 // Hook cho phép user refund token VCDAO để nhận lại 90% CFLR theo tỉ lệ cố định
 // Yêu cầu Treasury.sol có hàm refund(uint256 tokenAmount) và GovernanceToken có burnFrom
 // CFLR luôn trả về msg.sender (không cần recipient)
-export function useTokenRefund(contracts, account, setStatus, setIsLoading, proposals = [], onSuccess = null) {
+export function useTokenRefund(contracts, account, setStatus, setIsLoading, proposals = [], onSuccess = null, getCurrentRound = null) {
   const refund = useCallback(async ({ tokenAmount }) => {
     if (!contracts?.treasury || !contracts?.token) {
       setStatus && setStatus('❌ Contracts chưa sẵn sàng');
@@ -15,19 +15,30 @@ export function useTokenRefund(contracts, account, setStatus, setIsLoading, prop
       return null;
     }
 
-    // Kiểm tra có proposal đang trong thời gian vote không
-    // Chỉ cấm rút tiền khi có proposal ĐANG VOTE (active), không cấm khi đã thắng/thua
-    const now = new Date();
-    const activeProposal = proposals.find(p => {
-      const isPending = now < p.voteStart;
-      const isVoting = now >= p.voteStart && now <= p.voteEnd;
-      return (isPending || isVoting) && !p.executed;
-    });
-
-    if (activeProposal) {
-      setStatus && setStatus('❌ Không thể rút tiền khi có đề xuất đang vote');
-      return null;
-    }
+    // Ưu tiên kiểm tra trạng thái đợt hiện tại: nếu không có hoặc đã kết thúc -> cho phép refund
+    try {
+      if (typeof getCurrentRound === 'function') {
+        const round = getCurrentRound();
+        if (!round || round.isFinished) {
+          // Cho phép refund khi không có đợt active hoặc đợt đã kết thúc (early-win/hết 7 ngày)
+        } else {
+          setStatus && setStatus('❌ Không thể rút tiền khi có đề xuất đang vote');
+          return null;
+        }
+      } else {
+        // Fallback: kiểm tra theo thời gian đề xuất
+        const now = new Date();
+        const activeProposal = proposals.find(p => {
+          const isPending = now < p.voteStart;
+          const isVoting = now >= p.voteStart && now <= p.voteEnd;
+          return (isPending || isVoting) && !p.executed;
+        });
+        if (activeProposal) {
+          setStatus && setStatus('❌ Không thể rút tiền khi có đề xuất đang vote');
+          return null;
+        }
+      }
+    } catch {}
 
     try {
       const amountNum = parseFloat(String(tokenAmount || '').trim());
@@ -96,7 +107,7 @@ export function useTokenRefund(contracts, account, setStatus, setIsLoading, prop
     } finally {
       setIsLoading && setIsLoading(false);
     }
-  }, [contracts, account, setStatus, setIsLoading, proposals, onSuccess]);
+  }, [contracts, account, setStatus, setIsLoading, proposals, onSuccess, getCurrentRound]);
 
   return { refund };
 }
