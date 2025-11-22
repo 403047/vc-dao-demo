@@ -1,12 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ethers } from 'ethers';
-import { NETWORK_CONFIG, CONTRACT_ADDRESSES, GOVERNANCE_TOKEN_ABI, TREASURY_ABI, GOVERNOR_ABI } from '../src/config/daoContracts';
+import { NETWORK_CONFIG, CONTRACT_ADDRESSES, GOVERNANCE_TOKEN_ABI, TREASURY_ABI, GOVERNOR_ABI, READONLY_PROVIDER_URL } from '../src/config/daoContracts';
 
 export function useDaoNetwork(setStatus) {
   const [account, setAccount] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [cfrlBalance, setCfrlBalance] = useState('0');
   const [contracts, setContracts] = useState({});
+  const [isConnecting, setIsConnecting] = useState(false);
 
   const addCostonNetwork = useCallback(async () => {
     try {
@@ -39,11 +40,18 @@ export function useDaoNetwork(setStatus) {
 
   const refreshCflrBalance = useCallback(async (targetAccount) => {
     try {
-      if (!window.ethereum) return;
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
       const addr = targetAccount || account;
       if (!addr) return;
-      const balance = await provider.getBalance(addr);
+      try {
+        if (window.ethereum) {
+          const provider = new ethers.providers.Web3Provider(window.ethereum);
+          const balance = await provider.getBalance(addr);
+          setCfrlBalance(ethers.utils.formatEther(balance));
+          return;
+        }
+      } catch {}
+      const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+      const balance = await ro.getBalance(addr);
       setCfrlBalance(ethers.utils.formatEther(balance));
     } catch (e) {
       console.error('Error loading CFLR balance:', e);
@@ -66,11 +74,15 @@ export function useDaoNetwork(setStatus) {
         return null;
       }
 
+      if (isConnecting) return null;
+      setIsConnecting(true);
+
       await switchToCostonNetwork();
 
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       if (!accounts || accounts.length === 0) {
         setStatus && setStatus('Không tìm thấy tài khoản trong MetaMask!');
+        setIsConnecting(false);
         return null;
       }
 
@@ -83,14 +95,16 @@ export function useDaoNetwork(setStatus) {
       const signer = provider.getSigner();
       const c = initContracts(signer);
       await refreshCflrBalance(currentAccount);
+      setIsConnecting(false);
 
       return { provider, signer, account: currentAccount, contracts: c };
     } catch (error) {
       console.error('Connection error:', error);
       setStatus && setStatus('Lỗi: ' + (error.message || 'Không thể kết nối ví'));
+      setIsConnecting(false);
       return null;
     }
-  }, [initContracts, refreshCflrBalance, setStatus, switchToCostonNetwork]);
+  }, [initContracts, refreshCflrBalance, setStatus, switchToCostonNetwork, isConnecting]);
 
   // Auto-connect on mount if already authorized and on correct network
   useEffect(() => {
@@ -127,6 +141,18 @@ export function useDaoNetwork(setStatus) {
       } else {
         setIsConnected(false);
         setAccount('');
+        setTimeout(async () => {
+          try {
+            const accs = await window.ethereum.request({ method: 'eth_accounts' });
+            if (accs && accs.length > 0) {
+              setAccount(accs[0]);
+              setIsConnected(true);
+              refreshCflrBalance(accs[0]);
+            } else {
+              await connectWallet();
+            }
+          } catch {}
+        }, 1000);
       }
     };
 
@@ -145,7 +171,24 @@ export function useDaoNetwork(setStatus) {
       window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
       window.ethereum.removeListener('chainChanged', handleChainChanged);
     };
-  }, [refreshCflrBalance, setStatus]);
+  }, [refreshCflrBalance, setStatus, connectWallet]);
+
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState === 'visible' && !isConnected && !isConnecting) {
+        try {
+          const accounts = await window.ethereum?.request?.({ method: 'eth_accounts' }) || [];
+          if (accounts.length > 0) {
+            setAccount(accounts[0]);
+            setIsConnected(true);
+            refreshCflrBalance(accounts[0]);
+          }
+        } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [isConnected, isConnecting, refreshCflrBalance]);
 
   return {
     account,
@@ -156,5 +199,6 @@ export function useDaoNetwork(setStatus) {
     switchToCostonNetwork,
     addCostonNetwork,
     refreshCflrBalance,
+    isConnecting,
   };
 }

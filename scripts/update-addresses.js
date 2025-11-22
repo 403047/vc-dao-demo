@@ -1,35 +1,41 @@
-// Usage: node update-addresses.js <network> <token> <treasury> <governor>
 const fs = require('fs');
 const path = require('path');
 
-const args = process.argv.slice(2);
-if (args.length < 4) {
-  console.error('Usage: node scripts/update-addresses.js <network> <token> <treasury> <governor>');
-  process.exit(1);
+function readJson(p) {
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
-const [network, token, treasury, governor] = args;
 
-const frontendPath = path.join(__dirname, '..', 'vc-dao-demo', 'frontend', 'src', 'config', 'contract-addresses.json');
-let cfg = {};
+function writeJson(p, obj) {
+  fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+}
+
 try {
-  cfg = JSON.parse(fs.readFileSync(frontendPath, 'utf8'));
+  const repoRoot = __dirname.replace(/\\scripts$/, '');
+  const deployedPath = path.join(repoRoot, 'abis', 'deployed-addresses-coston.json');
+  if (!fs.existsSync(deployedPath)) {
+    throw new Error('Missing abis/deployed-addresses-coston.json. Run deployment first.');
+  }
+  const deployed = readJson(deployedPath);
+
+  const frontendJsonPath = path.join(repoRoot, 'frontend', 'src', 'config', 'contract-addresses.json');
+  if (!fs.existsSync(frontendJsonPath)) {
+    throw new Error('Missing frontend/src/config/contract-addresses.json');
+  }
+
+  const cfg = readJson(frontendJsonPath);
+  cfg.coston = cfg.coston || {};
+  cfg.coston.token = deployed.token;
+  cfg.coston.treasury = deployed.treasury;
+  cfg.coston.governor = deployed.governor;
+
+  writeJson(frontendJsonPath, cfg);
+
+  console.log('Updated frontend addresses (coston):');
+  console.log('  token   ', deployed.token);
+  console.log('  treasury', deployed.treasury);
+  console.log('  governor', deployed.governor);
+  console.log('\nTip: Reload the dev server or refresh the page to pick up changes.');
 } catch (e) {
-  console.error('Failed to read existing contract-addresses.json:', e.message || e);
+  console.error('update-addresses failed:', e.message || e);
   process.exit(1);
 }
-
-cfg[network] = Object.assign({}, cfg[network] || {}, {
-  token,
-  treasury,
-  governor
-});
-
-cfg.meta = Object.assign({}, cfg.meta || {}, {
-  lastUpdated: new Date().toISOString(),
-  deployedBy: process.env.DEPLOYER || null,
-  note: 'Addresses updated by scripts/update-addresses.js'
-});
-
-fs.writeFileSync(frontendPath, JSON.stringify(cfg, null, 2), 'utf8');
-console.log('Updated frontend contract-addresses.json at', frontendPath);
-console.log('New addresses:', { network, token, treasury, governor });

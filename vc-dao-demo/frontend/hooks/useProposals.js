@@ -1,8 +1,8 @@
-﻿import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
-import { GOVERNOR_ABI, CONTRACT_ADDRESSES, NETWORK_CONFIG } from '../src/config/daoContracts';
+import { GOVERNOR_ABI, CONTRACT_ADDRESSES, NETWORK_CONFIG, READONLY_PROVIDER_URL } from '../src/config/daoContracts';
 
-export function useProposals(contracts, account, setStatus, setIsLoading, onVoteSuccess = null, onCreateSuccess = null, onExecuteSuccess = null, tokenHoldersCount = 0) {
+export function useProposals(contracts, account, setStatus, setIsLoading, onVoteSuccess = null, onCreateSuccess = null, onExecuteSuccess = null, tokenHoldersCount = 0, prefUserTokenBalance = null, prefTotalSupply = null) {
   const [proposals, setProposals] = useState([]);
   
   // Helper function for safe localStorage access
@@ -97,7 +97,16 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
 
   const loadVoteEvents = useCallback(async (governorContract, proposalList = null) => {
     try {
-      const contract = governorContract;
+      const contract = (() => {
+        try {
+          if (governorContract) return governorContract;
+        } catch {}
+        try {
+          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+          return new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, ro);
+        } catch {}
+        return governorContract;
+      })();
       if (!contract) return;
 
       const targets = Array.isArray(proposalList) && proposalList.length > 0 ? proposalList : proposals;
@@ -119,8 +128,18 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
 
   const loadProposals = useCallback(async (governorContract) => {
     try {
-      if (!governorContract) return;
-      const count = await governorContract.proposalCount();
+      const reader = (() => {
+        try {
+          if (governorContract) return governorContract;
+        } catch {}
+        try {
+          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+          return new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, ro);
+        } catch {}
+        return governorContract;
+      })();
+      if (!reader) return;
+      const count = await reader.proposalCount();
       const total = parseInt(count.toString(), 10);
       const loaded = [];
 
@@ -128,7 +147,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
       // Proposals in contract start from index 1, not 0
       for (let i = 1; i <= total; i++) {
         try {
-          const proposalData = await governorContract.getProposal(i);
+          const proposalData = await reader.getProposal(i);
           const [id, proposer, title, description, recipient, amount, voteStart, voteEnd, yesVotes, noVotes, executed] = proposalData;
           
           // Skip empty proposals (index 0 or invalid data)
@@ -196,11 +215,11 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
       
       if (loaded.length === 0 && governorContract) {
         try {
-          const rc = await governorContract.proposalCount();
+          const rc = await reader.proposalCount();
           const rtotal = parseInt(rc.toString(), 10);
           for (let i = 1; i <= rtotal; i++) {
             try {
-              const data = await governorContract.getProposal(i);
+              const data = await reader.getProposal(i);
               const [id, proposer, title, description, recipient, amount, voteStart, voteEnd, yesVotes, noVotes, executed] = data;
               if (!proposer || proposer === '0x0000000000000000000000000000000000000000') continue;
               loaded.push({
@@ -224,11 +243,11 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
       
       // Query on-chain voter counts per proposal and update map using connected provider
       try {
-        if (!governorContract) throw new Error('Governor contract unavailable');
+        if (!reader) throw new Error('Governor contract unavailable');
         const countsMap = {};
         for (const p of loaded) {
           try {
-            const res = await governorContract.getVoterCounts(p.id);
+            const res = await reader.getVoterCounts(p.id);
             const yesCount = parseInt(res[0].toString(), 10);
             countsMap[p.id] = Array.from({ length: yesCount }, (_, i) => `v${i}`);
           } catch {}
@@ -300,26 +319,26 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
           const actualVoterCount = getVoterCount(p.id);
           
           if (actualVoterCount > 0 && yesVotes > 0) {
-            // Early-win: đa số người đủ điều kiện (>=1%) và tối thiểu 2 người
+            // Early-win: ≥50% số người đủ điều kiện (không ép tối thiểu 2)
             const totalHolders = tokenHoldersCount;
-            const majorityThreshold = totalHolders > 0 ? Math.floor(totalHolders / 2) + 1 : 0;
-            const hasEarlyWin = totalHolders > 0 && actualVoterCount >= Math.max(2, majorityThreshold);
+            const threshold = totalHolders > 0 ? Math.ceil(totalHolders / 2) : 0;
+            const hasEarlyWin = totalHolders > 0 && actualVoterCount >= threshold;
             
             if (hasEarlyWin) {
-              
               // Mark as early-win
               setEarlyWinProposals(prev => new Set([...prev, p.id]));
 
               const earlyWinTimestamp = Date.now();
               setEarlyWinTimestamps(prev => ({ ...prev, [p.id]: earlyWinTimestamp }));
-              
-              // TẮT AUTO-EXECUTE - Backend auto-executor sẽ xử lý
-              // Chỉ hiển thị thông báo, không execute trong frontend nữa
 
-              // Immediately finalize round locally so trading stops and UI updates
+              // Kiểm tra eligibleHoldersCount trước khi thực thi
+              // Không gọi executeProposal từ frontend để tránh cần xác nhận MetaMask
+              // Việc thực thi sẽ do hợp đồng xử lý nội bộ khi đạt early-win
+
+              // Finalize round locally so trading stops and UI updates
               finalizeRoundForEarlyWinner(p.id, Date.now());
 
-              // Also refresh proposals from chain shortly after
+              // Refresh proposals from chain shortly after
               setTimeout(() => {
                 loadProposals(contracts.governor);
               }, 500);
@@ -410,7 +429,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
         rounds.push(currentRound);
       }
 
-      // If previous round is finished, start a new round before processing this proposal
+      // Start a new round immediately after a finished round before processing subsequent proposals
       if (currentRound && currentRound.isFinished) {
         const roundStartTime = proposalCreatedTime;
         const roundEndTime = roundStartTime + (7 * 24 * 60 * 60 * 1000);
@@ -514,11 +533,26 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
     // Chỉ dựa vào thời gian tạo có nằm trong đợt hay không
     
     
+    // If recomputed set has no active round but we previously synthesized an active placeholder,
+    // keep that placeholder so UI shows the new round before any proposals exist
+    try {
+      const hasActive = rounds.some(r => !r.isFinished);
+      if (!hasActive && Array.isArray(investmentRounds)) {
+        const prevActive = investmentRounds.find(r => !r.isFinished);
+        if (prevActive) {
+          const existsSame = rounds.some(r => r.startTime === prevActive.startTime);
+          if (!existsSame) {
+            rounds.push(prevActive);
+          }
+        }
+      }
+    } catch {}
+
     // Persist sanitized rounds (do not store tentative 7-day endTime)
     persistInvestmentRounds(rounds);
     
     return rounds;
-  }, [proposals, earlyWinProposals, earlyWinTimestamps]);
+  }, [proposals, earlyWinProposals, earlyWinTimestamps, investmentRounds]);
 
   // Separate useEffect to sync investmentRounds state (avoid setState during render)
   useEffect(() => {
@@ -536,28 +570,41 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
   const getProposalStatus = useCallback((p, circulatingSupply = 0) => {
     if (!p) return 'unknown';
     if (p.executed) return 'executed';
-    if (earlyWinProposals.has(p.id)) return 'early-win';
     const rounds = getInvestmentRounds();
     const proposalRound = rounds.find(round => round.proposals.some(rp => rp.id === p.id));
+    const yesCount = (proposalVoters[p.id] || []).length;
+    const threshold = circulatingSupply > 0 ? Math.ceil(parseFloat(circulatingSupply) / 2) : 0;
+
+    // Early-win strictly by headcount while round is active
+    if (proposalRound && !proposalRound.isFinished) {
+      if (threshold > 0 && yesCount >= threshold) return 'early-win';
+      return 'active';
+    }
+
+    // Round finished: decide by headcount winner
     if (proposalRound && proposalRound.isFinished) {
-      if (proposalRound.earlyWinner && proposalRound.earlyWinner.id === p.id) return 'early-win';
-      if (proposalRound.earlyWinner && proposalRound.earlyWinner.id !== p.id) return 'defeated';
       const counts = (proposalRound.proposals || []).map(rp => ({ id: rp.id, c: (proposalVoters[rp.id] || []).length }));
       const max = counts.reduce((m, x) => x.c > m ? x.c : m, 0);
-      const myCount = (proposalVoters[p.id] || []).length;
+      const myCount = yesCount;
       if (max === 0) return 'defeated';
       return myCount === max ? 'succeeded' : 'defeated';
     }
+
     return 'active';
-  }, [earlyWinProposals, getInvestmentRounds, proposalVoters]);
+  }, [getInvestmentRounds, proposalVoters]);
 
   const getProposalCreatedTime = useCallback((p) => {
     const rounds = getInvestmentRounds();
     const proposalRound = rounds.find(r => r.proposals.some(rp => rp.id === p.id));
-    if (proposalRound && !proposalRound.isFinished) {
+    if (proposalRound) {
       return new Date(proposalRound.startTime);
     }
-    return p.voteStart instanceof Date ? p.voteStart : new Date(p.voteStart);
+    // Fallback: nếu chưa gán vòng, dùng startTime của vòng đầu tiên nếu có
+    if (rounds && rounds.length > 0) {
+      return new Date(rounds[0].startTime);
+    }
+    // Cuối cùng: tránh dùng ngày tạo riêng của đề xuất
+    return new Date();
   }, [getInvestmentRounds]);
 
   // Check if user can vote with detailed reason (only 1 vote per investment round)
@@ -984,8 +1031,8 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
         const actualVoterCount = getVoterCount(proposalId);
         // Use eligible holder count from hook if available
         const eligibleHolders = tokenHoldersCount || totalHolders;
-        const majorityThreshold = eligibleHolders > 0 ? Math.floor(eligibleHolders / 2) + 1 : 0;
-        const hasEarlyWin = eligibleHolders > 0 && actualVoterCount >= Math.max(2, majorityThreshold);
+        const threshold = eligibleHolders > 0 ? Math.ceil(eligibleHolders / 2) : 0;
+        const hasEarlyWin = eligibleHolders > 0 && actualVoterCount >= threshold;
         
           if (hasEarlyWin) {
           // Lưu vào earlyWinProposals Set
@@ -997,53 +1044,9 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
           const newTimestamps = { ...earlyWinTimestamps, [proposalId]: voteTimestamp };
           setEarlyWinTimestamps(newTimestamps);
           
-          setStatus('🎉 Đề xuất thắng sớm! Backend sẽ tự động chuyển tiền.');
-          
-          // TẮT AUTO-EXECUTE TRONG FRONTEND - Backend auto-executor sẽ xử lý
-          // Không cần MetaMask confirmation nữa, backend tự động execute
-          /*
-          // Hiện thị thông báo chuẩn bị cho user
-          setTimeout(() => {
-            setStatus('💰 Sẵn sàng chuyển tiền! Vui lòng xác nhận giao dịch trong MetaMask...');
-          }, 1000);
-          
-          // Tự động execute ngay khi early-win (vẫn cần xác nhận MetaMask)
-          setTimeout(async () => {
-            try {
-              setStatus('⏳ Đang gửi yêu cầu chuyển tiền...');
-              const tx = await contracts.governor.executeProposal(proposalId);
-              setStatus('⚙️ Đang xử lý giao dịch trên blockchain...');
-              await tx.wait();
-              setStatus('✅ Đã chuyển tiền thành công cho đề xuất thắng sớm!');
-              
-              // Reload proposals để cập nhật trạng thái
-              await loadProposals(contracts.governor);
-              
-              if (onExecuteSuccess) {
-                await onExecuteSuccess();
-              }
-            } catch (executeError) {
-              console.error('Auto-execute error:', executeError);
-              if (executeError.code === 4001) {
-                setStatus('❌ Bạn đã từ chối giao dịch. Đề xuất vẫn có thể được thực thi thủ công.');
-              } else {
-                setStatus('⚠️ Lỗi chuyển tiền: ' + executeError.message);
-              }
-            }
-          }, 2000);
-          
-          // Trigger immediate auto-execute check sau khi early-win
-          setTimeout(() => {
-            // Force trigger the auto-execute check
-            if (contracts?.governor && proposals.length > 0) {
-              const immediateCheck = async () => {
-                const refreshedProposals = await loadProposals(contracts.governor);
-                // Auto-execute check will run in the next useEffect cycle
-              };
-              immediateCheck();
-            }
-          }, 1000);
-          */
+          // Kiểm tra eligibleHoldersCount trước khi thực thi
+          // Không gọi executeProposal từ frontend để tránh cần xác nhận MetaMask
+          // Việc thực thi sẽ do hợp đồng xử lý nội bộ khi đạt early-win
           
           // Finalize round locally to end investment round immediately
           finalizeRoundForEarlyWinner(proposalId, voteTimestamp);
@@ -1160,8 +1163,36 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
     if (!account || !contracts?.token) return { percentage: 0, meetsMinimum: false };
     
     try {
-      const userTokenBalance = await contracts.token.balanceOf(account);
-      const totalSupply = await contracts.token.totalSupply();
+      // Fast path: dùng số liệu đã tải sẵn từ UI nếu có
+      if (prefUserTokenBalance !== null && prefTotalSupply !== null) {
+        const userBalNum = parseFloat(prefUserTokenBalance);
+        const totalSupNum = parseFloat(prefTotalSupply);
+        if (!isNaN(userBalNum) && !isNaN(totalSupNum) && totalSupNum > 0) {
+          const ownershipPercentage = (userBalNum / totalSupNum) * 100;
+          return {
+            percentage: ownershipPercentage,
+            meetsMinimum: ownershipPercentage >= 1,
+            formattedPercentage: ownershipPercentage.toFixed(4) + '%'
+          };
+        }
+      }
+
+      let userTokenBalance, totalSupply;
+      try {
+        userTokenBalance = await contracts.token.balanceOf(account);
+        totalSupply = await contracts.token.totalSupply();
+      } catch (primaryErr) {
+        try {
+          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+          const roToken = new ethers.Contract(contracts.token.address, ['function balanceOf(address) view returns (uint256)', 'function totalSupply() view returns (uint256)'], ro);
+          const pBal = roToken.balanceOf(account);
+          const pTs = roToken.totalSupply();
+          userTokenBalance = await Promise.race([pBal, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 1500))]);
+          totalSupply = await Promise.race([pTs, new Promise(resolve => setTimeout(() => resolve(ethers.BigNumber.from(0)), 1500))]);
+        } catch (fallbackErr) {
+          throw fallbackErr;
+        }
+      }
       
       const userBalanceInTokens = parseFloat(ethers.utils.formatEther(userTokenBalance));
       const totalSupplyInTokens = parseFloat(ethers.utils.formatEther(totalSupply));
@@ -1177,7 +1208,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
       console.error('Error getting user ownership:', error);
       return { percentage: 0, meetsMinimum: false };
     }
-  }, [account, contracts?.token]);
+  }, [account, contracts?.token, prefUserTokenBalance, prefTotalSupply]);
 
   // Get detailed voting eligibility info for a proposal
   const getVotingEligibility = useCallback(async (proposalId) => {
@@ -1187,7 +1218,9 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
     if (!targetProposal) return { canVote: false, reason: 'proposal_not_found', ownershipInfo: null };
     
     // Get ownership info
-    const ownershipInfo = await getUserOwnership();
+    const timeoutMs = 1200;
+    const guard = (p, fallback) => Promise.race([p, new Promise(resolve => setTimeout(() => resolve(fallback), timeoutMs))]);
+    const ownershipInfo = await guard(getUserOwnership(), { percentage: 0, meetsMinimum: true, formattedPercentage: '0%' });
     
     // Check ownership requirement first
     if (!ownershipInfo.meetsMinimum) {
@@ -1198,17 +1231,41 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
       };
     }
     
-    // Stronger cross-client check: read on-chain hasVoted
+    // Stronger cross-client check: read on-chain hasVoted (with read-only fallback & timeout)
     let governorReader = null;
     try {
       if (contracts?.governor) {
         governorReader = contracts.governor;
       }
     } catch {}
+    if (!governorReader) {
+      try {
+        const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+        governorReader = new ethers.Contract(CONTRACT_ADDRESSES.governor, GOVERNOR_ABI, ro);
+      } catch {}
+    }
+
+    const safeHasVoted = async (pid, addr) => {
+      try {
+        const p = new Promise(async (resolve) => {
+          try {
+            const v = await governorReader.hasVoted(pid, addr);
+            resolve(Boolean(v));
+          } catch (e) {
+            resolve(false);
+          }
+        });
+        const t = new Promise(resolve => setTimeout(() => resolve(false), 2500));
+        const r = await Promise.race([p, t]);
+        return Boolean(r);
+      } catch {
+        return false;
+      }
+    };
 
     try {
       if (governorReader && typeof governorReader.hasVoted === 'function') {
-        const voted = await governorReader.hasVoted(proposalId, account);
+        const voted = await safeHasVoted(proposalId, account);
         if (voted) {
           return { 
             canVote: false, 
@@ -1236,7 +1293,7 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
         for (const rp of activeRound.proposals) {
           if (rp.id === proposalId) continue;
           if (governorReader && typeof governorReader.hasVoted === 'function') {
-            const votedAny = await governorReader.hasVoted(rp.id, account);
+            const votedAny = await safeHasVoted(rp.id, account);
             if (votedAny) {
               return { 
                 canVote: false, 
@@ -1258,9 +1315,9 @@ export function useProposals(contracts, account, setStatus, setIsLoading, onVote
 
   // Check if a proposal should be hidden because its investment round has finished
   const shouldHideProposal = useCallback((proposal) => {
-    // If this proposal itself is an early winner, don't hide it (it goes to winning tab)
+    // Nếu chính đề xuất này là early winner, ẩn khỏi tab proposals
     if (earlyWinProposals.has(proposal.id)) {
-      return false;
+      return true;
     }
     
     // If proposal is executed, hide it from proposals tab (show in winning tab)

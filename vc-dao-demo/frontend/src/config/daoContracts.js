@@ -33,15 +33,15 @@ const DEFAULT_ADDRESSES = {
 };
 
 export const CONTRACT_ADDRESSES = {
-  token: abisAddresses.token || ENV_ADDRESSES.token || DEFAULT_ADDRESSES.token,
-  treasury: abisAddresses.treasury || ENV_ADDRESSES.treasury || DEFAULT_ADDRESSES.treasury,
-  governor: abisAddresses.governor || ENV_ADDRESSES.governor || DEFAULT_ADDRESSES.governor
+  token: ENV_ADDRESSES.token || abisAddresses.token || DEFAULT_ADDRESSES.token,
+  treasury: ENV_ADDRESSES.treasury || abisAddresses.treasury || DEFAULT_ADDRESSES.treasury,
+  governor: ENV_ADDRESSES.governor || abisAddresses.governor || DEFAULT_ADDRESSES.governor
 };
 
 if (typeof window !== 'undefined') {
   Object.entries(CONTRACT_ADDRESSES).forEach(([key, value]) => {
-    if (!abisAddresses[key] && !ENV_ADDRESSES[key]) {
-      console.warn(`[daoContracts] Using fallback ${key} address ${value}. Define NEXT_PUBLIC_${key.toUpperCase()}_ADDRESS in .env.local or deploy contracts to update abis.`);
+    if (!ENV_ADDRESSES[key] && !abisAddresses[key]) {
+      console.warn(`[daoContracts] Using fallback ${key} address ${value}. Define NEXT_PUBLIC_${key.toUpperCase()}_ADDRESS in .env.local or update src/config/contract-addresses.json.`);
     }
   });
 }
@@ -83,6 +83,8 @@ export const GOVERNOR_ABI = [
   'function proposalCount() view returns (uint256)',
   'function createProposal(string, string, address, uint256) external returns (uint256)',
   'function endVotingNow(uint256) external',
+  'function updateEligibleHoldersCount(uint256) external',
+  'function eligibleHoldersCount() view returns (uint256)',
   'function castVote(uint256, bool) external',
   'function executeProposal(uint256) external',
   'function getProposal(uint256) view returns (uint256, address, string, string, address, uint256, uint256, uint256, uint256, uint256, bool)',
@@ -94,3 +96,4 @@ export const GOVERNOR_ABI = [
   'event ProposalCreated(uint256 indexed proposalId, address indexed proposer, string title, uint256 amount, address recipient)',
   'event VoteCast(address indexed voter, uint256 indexed proposalId, uint8 support, uint256 weight)'
 ];
+export const READONLY_PROVIDER_URL = NETWORK_CONFIG.rpcUrls[0];

@@ -22,6 +22,7 @@ contract VCGovernor {
         uint256 yesVoterCount;
         uint256 noVoterCount;
         bool executed;
+        uint256 roundId;
         mapping(address => bool) voters;
     }
 
@@ -50,6 +51,13 @@ contract VCGovernor {
     uint256 public votingDelay = 0; // Không có delay, bắt đầu vote ngay
     uint256 public votingPeriod = 7 days; // Voting trong 7 ngày
     uint256 public quorumPercentage = 10;
+    uint256 public eligibleHoldersCount = 0;
+    uint256 public currentRoundStart = 0;
+    uint256 public currentRoundEnd = 0;
+    bool public roundActive = false;
+    uint256 public currentRoundId = 0;
+    uint256 public nextRoundId = 1;
+    mapping(uint256 => Round) public rounds;
 
     event ProposalCreated(
         uint256 indexed proposalId,
@@ -80,6 +88,21 @@ contract VCGovernor {
         owner = msg.sender;
     }
 
+    function _startNewRound(uint256 startTs) internal {
+        currentRoundStart = startTs + votingDelay;
+        currentRoundEnd = currentRoundStart + votingPeriod;
+        roundActive = true;
+        currentRoundId = nextRoundId;
+        Round storage r = rounds[currentRoundId];
+        r.id = currentRoundId;
+        r.start = currentRoundStart;
+        r.end = currentRoundEnd;
+        r.finished = false;
+        r.earlyWinnerId = 0;
+        r.proposalCount = 0;
+        nextRoundId += 1;
+    }
+
     function createProposal(
         string memory _title,
         string memory _description,
@@ -89,7 +112,10 @@ contract VCGovernor {
         require(governanceToken.balanceOf(msg.sender) > 0, "Must hold tokens to propose");
         require(_amount > 0, "Amount must be greater than 0");
         require(_recipient != address(0), "Invalid recipient address");
-        
+        if (!roundActive || block.timestamp > currentRoundEnd) {
+            _startNewRound(block.timestamp);
+        }
+
         proposalCount++;
         Proposal storage newProposal = proposals[proposalCount];
         newProposal.id = proposalCount;
@@ -98,10 +124,14 @@ contract VCGovernor {
         newProposal.description = _description;
         newProposal.recipient = _recipient;
         newProposal.amount = _amount;
-        newProposal.voteStart = block.timestamp + votingDelay;
-        // voteEnd sẽ được quyết định bởi investment round, không phải individual proposal
-        newProposal.voteEnd = block.timestamp + votingDelay + (7 * 24 * 60 * 60); // Default 7 days
+        newProposal.voteStart = currentRoundStart;
+        newProposal.voteEnd = currentRoundEnd;
         newProposal.executed = false;
+        newProposal.roundId = currentRoundId;
+
+        // Update round meta
+        Round storage r = rounds[currentRoundId];
+        r.proposalCount += 1;
         
         emit ProposalCreated(
             proposalCount, 
@@ -118,9 +148,15 @@ contract VCGovernor {
         Proposal storage proposal = proposals[_proposalId];
         require(proposal.id == _proposalId, "Proposal does not exist");
         require(block.timestamp >= proposal.voteStart, "Voting not started");
-        require(block.timestamp <= proposal.voteEnd, "Voting ended");
+        // Enforce voting only for proposals in the current active round
+        require(roundActive && block.timestamp <= currentRoundEnd, "Voting ended");
+        require(proposal.roundId == currentRoundId, "Wrong round for voting");
+        require(!rounds[proposal.roundId].finished, "Round finished");
         require(!proposal.voters[msg.sender], "Already voted");
-        require(governanceToken.balanceOf(msg.sender) > 0, "No tokens to vote");
+        uint256 bal = governanceToken.balanceOf(msg.sender);
+        uint256 ts = governanceToken.totalSupply();
+        require(bal > 0, "No tokens to vote");
+        require(bal * 100 >= ts, "Not eligible");
 
         uint256 voterWeight = governanceToken.balanceOf(msg.sender);
         
@@ -145,18 +181,18 @@ contract VCGovernor {
         require(!proposal.executed, "Already executed");
         require(proposal.yesVotes > proposal.noVotes, "Proposal failed");
         
-        uint256 totalSupply = governanceToken.totalSupply();
-        uint256 quorumRequired = (totalSupply * quorumPercentage) / 100;
-        require(proposal.yesVotes >= quorumRequired, "Quorum not reached");
-
-        // Allow early execution if proposal has overwhelming support by people count
-        bool canExecuteEarly = proposal.yesVoterCount >= 2;
-        
-        // Either voting ended OR early-win condition met
-        require(
-            block.timestamp > proposal.voteEnd || canExecuteEarly, 
-            "Voting not ended and no early-win"
-        );
+        uint256 threshold = (eligibleHoldersCount + 1) / 2;
+        if (eligibleHoldersCount == 0) {
+            threshold = 2; // Fallback: cần tối thiểu 2 người đồng ý khi chưa đồng bộ eligible holders
+        }
+        bool canExecuteEarly = proposal.yesVoterCount >= threshold;
+        if (!canExecuteEarly) {
+            uint256 totalSupply2 = governanceToken.totalSupply();
+            uint256 quorumRequired2 = (totalSupply2 * quorumPercentage) / 100;
+            require(block.timestamp > currentRoundEnd, "Voting not ended");
+            require(proposal.yesVotes > proposal.noVotes, "Proposal failed");
+            require(proposal.yesVotes >= quorumRequired2, "Quorum not reached");
+        }
 
         // Sử dụng internal function để execute
         _executeProposalInternal(_proposalId);
@@ -168,7 +204,7 @@ contract VCGovernor {
         
         if (proposal.executed) return ProposalState.Executed;
         if (block.timestamp < proposal.voteStart) return ProposalState.Pending;
-        if (block.timestamp <= proposal.voteEnd) return ProposalState.Active;
+        if (roundActive && block.timestamp <= currentRoundEnd && !rounds[proposal.roundId].finished && proposal.roundId == currentRoundId) return ProposalState.Active;
         if (proposal.yesVotes <= proposal.noVotes) return ProposalState.Defeated;
         return ProposalState.Succeeded;
     }
@@ -255,6 +291,10 @@ contract VCGovernor {
         emit VotingSettingsUpdated(_delay, _period, _quorum);
     }
 
+    function updateEligibleHoldersCount(uint256 _count) external onlyOwner {
+        eligibleHoldersCount = _count;
+    }
+
     function transferOwnership(address newOwner) external onlyOwner {
         require(newOwner != address(0), "Invalid owner");
         owner = newOwner;
@@ -266,6 +306,12 @@ contract VCGovernor {
         require(proposal.id == _proposalId, "Proposal does not exist");
         // Đặt thời gian kết thúc bằng thời điểm hiện tại
         proposal.voteEnd = block.timestamp;
+        currentRoundEnd = block.timestamp;
+        roundActive = false;
+        // Mark round finished
+        Round storage r = rounds[proposal.roundId];
+        r.end = currentRoundEnd;
+        r.finished = true;
         emit VotingEndedNow(_proposalId);
 
         // Kiểm tra và auto-execute nếu thỏa điều kiện sau khi kết thúc
@@ -280,22 +326,29 @@ contract VCGovernor {
         if (proposal.executed) return;
         
         // Kiểm tra điều kiện early-win theo số người vote YES
-        uint256 totalSupply = governanceToken.totalSupply();
-        bool hasEarlyWin = proposal.yesVoterCount >= 2;
+        uint256 thresholdAuto = (eligibleHoldersCount + 1) / 2;
+        if (eligibleHoldersCount == 0) {
+            thresholdAuto = 2;
+        }
+        bool hasEarlyWin = proposal.yesVoterCount >= thresholdAuto;
         
         // Kiểm tra đã kết thúc voting và thắng cuộc
-        bool votingEnded = block.timestamp > proposal.voteEnd;
+        bool votingEnded = block.timestamp > currentRoundEnd;
         bool proposalWon = proposal.yesVotes > proposal.noVotes;
         
         // Kiểm tra quorum
-        uint256 quorumRequired = (totalSupply * quorumPercentage) / 100;
-        bool quorumMet = proposal.yesVotes >= quorumRequired;
-        
-        // Auto-execute nếu: (early-win HOẶC voting ended + won) VÀ quorum met
-        if (quorumMet && proposalWon && (hasEarlyWin || votingEnded)) {
-            // Emit event để backend service biết cần auto-execute
+        uint256 totalSupply3 = governanceToken.totalSupply();
+        uint256 quorumRequired3 = (totalSupply3 * quorumPercentage) / 100;
+        bool quorumMet3 = proposal.yesVotes >= quorumRequired3;
+        if (hasEarlyWin || (votingEnded && proposalWon && quorumMet3)) {
+            // Mark round finished and set early winner when applicable
+            Round storage r = rounds[proposal.roundId];
+            r.finished = true;
+            r.end = block.timestamp;
+            if (hasEarlyWin) {
+                r.earlyWinnerId = proposal.id;
+            }
             emit ProposalReadyForExecution(_proposalId, proposal.recipient, proposal.amount);
-            // Tự động execute proposal
             _executeProposalInternal(_proposalId);
         }
     }
@@ -306,6 +359,12 @@ contract VCGovernor {
         
         // Mark as executed trước để tránh reentrancy
         proposal.executed = true;
+        roundActive = false;
+        currentRoundEnd = block.timestamp;
+        Round storage r = rounds[proposal.roundId];
+        r.finished = true;
+        r.end = currentRoundEnd;
+        r.earlyWinnerId = r.earlyWinnerId == 0 ? proposal.id : r.earlyWinnerId;
         
         // Chuyển tiền từ treasury
         string memory description = string(abi.encodePacked(
@@ -323,6 +382,12 @@ contract VCGovernor {
         
         // Emit event
         emit ProposalExecuted(_proposalId);
+    }
+
+    // Views for rounds
+    function getRound(uint256 roundId) external view returns (uint256 id, uint256 start, uint256 end, bool finished, uint256 earlyWinnerId, uint256 proposalCount) {
+        Round storage r = rounds[roundId];
+        return (r.id, r.start, r.end, r.finished, r.earlyWinnerId, r.proposalCount);
     }
 
     // Helper function to convert uint to string
@@ -346,3 +411,11 @@ contract VCGovernor {
         return string(bstr);
     }
 }
+    struct Round {
+        uint256 id;
+        uint256 start;
+        uint256 end;
+        bool finished;
+        uint256 earlyWinnerId; // 0 if none
+        uint256 proposalCount;
+    }

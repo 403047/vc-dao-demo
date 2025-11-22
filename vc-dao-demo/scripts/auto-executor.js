@@ -32,11 +32,25 @@ class AutoExecutor {
         console.log('📋 Loaded contract addresses:', addresses);
 
         // Load ABIs và create contract instances
-        const governorABI = JSON.parse(fs.readFileSync('./abis/VCGovernor.json', 'utf8')).abi;
-        const treasuryABI = JSON.parse(fs.readFileSync('./abis/Treasury.json', 'utf8')).abi;
+        const governorABI = [
+            'function proposalCount() view returns (uint256)',
+            'function getProposal(uint256) view returns (uint256,address,string,string,address,uint256,uint256,uint256,uint256,uint256,bool)',
+            'function getVoterCounts(uint256) view returns (uint256,uint256)',
+            'function executeProposal(uint256) external',
+            'function owner() view returns (address)',
+            'function updateEligibleHoldersCount(uint256) external'
+        ];
+        const treasuryABI = [
+            'function getBalance() view returns (uint256)',
+            'function owner() view returns (address)'
+        ];
+        const tokenABI = [
+            'function totalSupply() view returns (uint256)'
+        ];
         
         this.contracts.governor = new ethers.Contract(addresses.governor, governorABI, this.wallet);
         this.contracts.treasury = new ethers.Contract(addresses.treasury, treasuryABI, this.wallet);
+        this.contracts.token = new ethers.Contract(addresses.token, tokenABI, this.wallet);
         
         console.log('✅ Contracts initialized successfully');
     }
@@ -48,21 +62,7 @@ class AutoExecutor {
         }
 
         this.isRunning = true;
-        console.log('👂 Starting to listen for ProposalReadyForExecution events...');
-
-        // Listen for ProposalReadyForExecution events
-        this.contracts.governor.on("ProposalReadyForExecution", async (proposalId, recipient, amount, event) => {
-            console.log('\n🎯 ProposalReadyForExecution event detected!');
-            console.log('📊 Details:', {
-                proposalId: proposalId.toString(),
-                recipient,
-                amount: ethers.utils.formatEther(amount) + ' CFLR',
-                blockNumber: event.blockNumber,
-                transactionHash: event.transactionHash
-            });
-
-            await this.executeProposal(proposalId.toNumber());
-        });
+        console.log('👂 Event listener disabled (minimal ABI). Using periodic checks instead...');
 
         // Check proposals existing mỗi 60 giây để tránh spam
         setInterval(async () => {
@@ -70,12 +70,29 @@ class AutoExecutor {
             await this.checkExistingProposals();
         }, 60000);
 
+        // Định kỳ đồng bộ số người đủ điều kiện vote (>=1%) mỗi 5 phút
+        setInterval(async () => {
+            try {
+                await this.syncEligibleHoldersCount();
+            } catch (e) {
+                console.error('syncEligibleHoldersCount error:', e.message || e);
+            }
+        }, 5 * 60 * 1000);
+
         console.log('✅ Auto-executor service is now running!');
         console.log('💡 Press Ctrl+C to stop the service');
         
         // Check existing proposals ngay khi start
         console.log('🔄 Checking existing proposals on startup...');
         await this.checkExistingProposals();
+
+        // Đồng bộ eligible holders ngay khi start
+        console.log('🔧 Syncing eligible holders count on startup...');
+        try {
+            await this.syncEligibleHoldersCount();
+        } catch (e) {
+            console.error('Initial syncEligibleHoldersCount failed:', e.message || e);
+        }
     }
 
     async executeProposal(proposalId) {
@@ -174,6 +191,58 @@ class AutoExecutor {
 
     sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async syncEligibleHoldersCount() {
+        try {
+            if (!this.contracts || !this.contracts.token || !this.contracts.governor) return;
+
+            const tokenAddr = this.contracts.token.address;
+            const totalSupply = await this.contracts.token.totalSupply();
+            const decimals = 18;
+            const total = parseFloat(ethers.utils.formatUnits(totalSupply, decimals));
+            if (total === 0) {
+                console.log('⚠️ Total supply is 0; skipping eligible holders sync');
+                return;
+            }
+
+            let holders = [];
+            try {
+                const url = `https://coston-explorer.flare.network/api/v2/tokens/${tokenAddr}/holders`;
+                const res = await fetch(url);
+                const data = await res.json();
+                const list = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+                holders = list.map(h => ({
+                    address: h.address || h.holder || h.account || '',
+                    balance: typeof h.balance === 'string' ? parseFloat(h.balance) : (h.balance || 0)
+                }));
+            } catch (e) {
+                console.error('Explorer holders fetch failed:', e.message || e);
+            }
+
+            if (!holders.length) {
+                console.log('⚠️ No holders from explorer; skipping eligible sync');
+                return;
+            }
+
+            const eligibleCount = holders.filter(h => ((h.balance / total) * 100) >= 1).length;
+
+            const currentOwner = await this.contracts.governor.owner();
+            if (currentOwner.toLowerCase() !== this.wallet.address.toLowerCase()) {
+                console.log('⚠️ Wallet is not governor owner; cannot update eligible holders');
+                return;
+            }
+
+            const fixedGasPrice = ethers.utils.parseUnits('30', 'gwei');
+            const tx = await this.contracts.governor.updateEligibleHoldersCount(eligibleCount, {
+                gasPrice: fixedGasPrice,
+                gasLimit: 200000
+            });
+            await tx.wait();
+            console.log(`✅ Synced eligible holders count to ${eligibleCount}`);
+        } catch (e) {
+            console.error('syncEligibleHoldersCount error:', e.message || e);
+        }
     }
 
     stop() {

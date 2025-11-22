@@ -1,7 +1,7 @@
 {
-  "token": "0x46715a08617f8953C66D6f5BfcEFB32810623a4e",
-  "treasury": "0x7F388c16B5e5c673387693C420638A6127692051",
-  "governor": "0x4cE95116861B27B518d14c1688f99AC945dBb6e1",
+  "token": "0x390E8959e73CF71cecb2e905f81814f0b66e0ea2",
+  "treasury": "0xA6ba003e655d58Ac2D97d2E27bD060e145E142c7",
+  "governor": "0x529CE9453A5f287BaaE5eC6D65C1412bFD6Ea031",
   "network": "coston",
   "chainId": 16
 }

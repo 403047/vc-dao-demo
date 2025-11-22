@@ -146,7 +146,7 @@ export default function WinningProposals({
                   </span>
                   {isEarlyWin && circulatingSupply > 0 && (
                     <span className="text-yellow-400">
-                      Trên 50% người sở hữu đồng ý
+                      ≥ 50% người sở hữu đồng ý
                     </span>
                   )}
                 </div>

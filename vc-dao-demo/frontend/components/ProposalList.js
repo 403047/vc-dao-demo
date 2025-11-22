@@ -393,7 +393,7 @@ export default function ProposalList({
                 </div>
                 <div className="flex justify-between text-xs text-gray-500 mt-1">
                   <span>0%</span>
-                  <span className="text-yellow-400">50% (thắng sớm)</span>
+                  <span className="text-yellow-400">&gt; 50% (thắng sớm)</span>
                   <span>100%</span>
                 </div>
               </div>
@@ -402,7 +402,7 @@ export default function ProposalList({
                 {(() => {
                   const status = getProposalStatus(proposal, circulatingSupply);
                   const eligibility = votingEligibility[proposal.id];
-                  const canVote = status === 'active' && eligibility?.canVote === true;
+                  const canVote = status === 'active' && (!eligibility || eligibility?.canVote === true || eligibility?.reason === 'timeout');
                   const isWon = status === 'early-win' || status === 'succeeded';
                   const isPending = status === 'pending';
                   
@@ -471,7 +471,9 @@ export default function ProposalList({
                           <label htmlFor={`select-${proposal.id}`} className="text-sm font-medium flex-1">
                             {(() => {
                               const eligibility = votingEligibility[proposal.id];
-                              if (!eligibility) return 'Đang kiểm tra điều kiện vote...';
+                              if (!eligibility) {
+                                return status === 'active' ? 'Chọn đề xuất này để vote' : 'Đang kiểm tra điều kiện vote...';
+                              }
                               
                               switch (eligibility.reason) {
                                 case 'already_voted':
@@ -490,6 +492,8 @@ export default function ProposalList({
                                     </div>
                                   );
                                 case 'eligible':
+                                  return 'Chọn đề xuất này để vote';
+                                case 'timeout':
                                   return 'Chọn đề xuất này để vote';
                                 default:
                                   return 'Không thể vote - vui lòng thử lại';

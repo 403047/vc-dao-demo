@@ -82,7 +82,9 @@ export default function Home() {
       // Reload balances sau khi execute proposal
       await loadBalances(contracts.token, contracts.treasury, account);
     },
-    (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0)
+    (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0),
+    tokenBalance,
+    totalSupply
   );
   const [newProposal, setNewProposal] = useState({
     title: '',
@@ -118,6 +120,8 @@ export default function Home() {
     };
     loadGovernorOwner();
   }, [dao.contracts?.governor]);
+
+  // Đồng bộ eligible holders được xử lý ở backend auto-executor; frontend không gửi giao dịch để tránh yêu cầu xác nhận ví
 
   const { buyTokens } = useTokenPurchase(dao.contracts, dao.account, setStatus, setIsLoading, async (addr) => {
     await dao.refreshCflrBalance(addr);
@@ -399,75 +403,30 @@ export default function Home() {
               {/* Các tabs khác giữ nguyên */}
               {/* Proposals Tab */}
               {activeTab === 'proposals' && (() => {
-                const now = new Date();
-                
                 if (proposals.length === 0 && contracts.governor) {
                   loadProposals(contracts.governor);
                 }
-                
-                // Nhóm proposals theo thời gian tạo (cùng batch trong 1 giờ)
-                const proposalGroups = {};
-                proposals.forEach(p => {
-                  const groupKey = Math.floor(p.voteStart.getTime() / (3600 * 1000)); // Group by hour
-                  if (!proposalGroups[groupKey]) proposalGroups[groupKey] = [];
-                  proposalGroups[groupKey].push(p);
-                });
-                
-                // LOGIC MỚI: Chỉ hiển thị proposals trong đợt chưa kết thúc (không có early-win)
-                
-                // 1. Tìm tất cả proposals với status khác nhau
-                const allProposalStatuses = proposals.map(p => ({
-                  id: p.id,
-                  title: p.title,
-                  status: getProposalStatus(p, (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0)),
-                  voteStart: p.voteStart
-                }));
 
-                // 3. Tìm latest winning proposal để xác định điểm bắt đầu đợt mới
-                const winningProposals = proposals.filter(p => {
-                  const status = getProposalStatus(p, (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0));
-                  return status === 'succeeded' || status === 'executed' || status === 'early-win';
-                }).sort((a, b) => b.voteStart - a.voteStart);
+                const totalEligible = Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0;
+                const currentRound = getCurrentRound();
 
-                const latestWin = winningProposals[0];
-                // Use millisecond precision for new round start time
-                const newRoundStartTime = latestWin ? new Date(latestWin.voteStart.getTime() + 1000) : new Date(0); // +1 second
+                // Nếu không có vòng hiện tại hoặc vòng đã kết thúc/đã có early winner: ẩn hết
+                const shouldHideAll = !currentRound || currentRound.isFinished || (currentRound.earlyWinner != null);
 
-                // 3. Chỉ hiển thị proposals được tạo SAU lần thắng cuối (đợt mới)
-                const newRoundProposals = proposals.filter(p => {
-                  const status = getProposalStatus(p, (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0));
-                  const isActive = status === 'active' || status === 'pending';
-                  const isInNewRound = p.voteStart >= newRoundStartTime;
-                  
-                  return isActive && isInNewRound;
-                });
+                const displayProposals = shouldHideAll
+                  ? []
+                  : (currentRound.proposals || []).map(rp => proposals.find(pp => pp.id === rp.id)).filter(Boolean);
 
-                // 4. Kiểm tra đợt mới có early-win không
-                const newRoundHasEarlyWin = newRoundProposals.some(p => {
-                  const status = getProposalStatus(p, (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0));
-                  return status === 'early-win';
-                });
-
-                let displayProposals = [];
-                
-                if (newRoundHasEarlyWin) {
-                  // 5. Nếu đợt mới có early-win, ẩn tất cả proposals trong tab này
-                  displayProposals = [];
-                } else {
-                  // 6. Hiển thị proposals của đợt mới
-                  displayProposals = newRoundProposals;
-                }
-                
                 return (
                   <ProposalList
                     proposals={displayProposals}
-                    getProposalStatus={(p) => getProposalStatus(p, (Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0))}
+                    getProposalStatus={(p) => getProposalStatus(p, totalEligible)}
                     voteOnProposal={voteOnProposal}
                     isLoading={isLoading}
                     onCreateClick={() => {
                       if (checkProposalPermission()) setActiveTab('create');
                     }}
-                    circulatingSupply={(Array.isArray(tokenHolders) ? tokenHolders.filter(h => parseFloat(h.percentage || '0') >= 1).length : 0)}
+                    circulatingSupply={totalEligible}
                     hasUserVoted={(proposalId) => {
                       return votedProposals.has(proposalId);
                     }}

@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
-import { NETWORK_CONFIG } from '../src/config/daoContracts';
+import { NETWORK_CONFIG, READONLY_PROVIDER_URL } from '../src/config/daoContracts';
 
 export function useTokenHolders(setStatus) {
   const [tokenHolders, setTokenHolders] = useState([]);
@@ -16,13 +16,31 @@ export function useTokenHolders(setStatus) {
       if (!tokenContract) return;
       setIsLoadingHolders(true);
 
-      const owner = await tokenContract.owner();
+      let owner = '';
+      let supply = ethers.BigNumber.from(0);
+      let ownerBal = ethers.BigNumber.from(0);
+      try {
+        owner = await tokenContract.owner();
+        supply = await tokenContract.totalSupply();
+        ownerBal = await tokenContract.balanceOf(owner);
+      } catch (ePrimary) {
+        try {
+          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+          const roToken = new ethers.Contract(tokenContract.address, [
+            'function owner() view returns (address)',
+            'function totalSupply() view returns (uint256)',
+            'function balanceOf(address) view returns (uint256)'
+          ], ro);
+          owner = await roToken.owner();
+          supply = await roToken.totalSupply();
+          ownerBal = await roToken.balanceOf(owner);
+        } catch (eFallback) {
+          throw eFallback;
+        }
+      }
       setOwnerAddress(owner.toLowerCase());
-      const supply = await tokenContract.totalSupply();
       const formattedSupply = ethers.utils.formatUnits(supply, 18);
       setTotalSupply(formattedSupply);
-
-      const ownerBal = await tokenContract.balanceOf(owner);
       const formattedOwnerBalance = ethers.utils.formatUnits(ownerBal, 18);
       setOwnerBalance(formattedOwnerBalance);
 
@@ -64,7 +82,7 @@ export function useTokenHolders(setStatus) {
       } catch (apiError) {
         // Fallback: token mới, thử build holders từ on-chain Transfer logs
         try {
-          const rpcProvider = tokenContract.provider;
+          const rpcProvider = tokenContract.provider || new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
           if (!rpcProvider) throw new Error('No provider available for on-chain fallback');
 
           const transferTopic = ethers.utils.id('Transfer(address,address,uint256)');

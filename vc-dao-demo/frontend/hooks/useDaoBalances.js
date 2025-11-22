@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { ethers } from 'ethers';
+import { READONLY_PROVIDER_URL } from '../src/config/daoContracts';
 
 export function useDaoBalances(setStatus) {
   const [tokenBalance, setTokenBalance] = useState('0');
@@ -14,16 +15,29 @@ export function useDaoBalances(setStatus) {
         const tokenBal = await tokenContract.balanceOf(account);
         setTokenBalance(ethers.utils.formatUnits(tokenBal, 18));
       } catch (e) {
-        console.error('Token balance error:', e);
-        setTokenBalance('0');
+        try {
+          const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+          const roToken = new ethers.Contract(tokenContract.address, ['function balanceOf(address) view returns (uint256)'], ro);
+          const tokenBal = await roToken.balanceOf(account);
+          setTokenBalance(ethers.utils.formatUnits(tokenBal, 18));
+        } catch (e2) {
+          console.error('Token balance error:', e2);
+          setTokenBalance('0');
+        }
       }
       if (treasuryContract) {
         try {
           const treasuryBal = await treasuryContract.getBalance();
           setTreasuryBalance(ethers.utils.formatEther(treasuryBal));
         } catch (e) {
-          console.error('Treasury balance error:', e);
-          setTreasuryBalance('0');
+          try {
+            const ro = new ethers.providers.JsonRpcProvider(READONLY_PROVIDER_URL);
+            const bal = await ro.getBalance(treasuryContract.address);
+            setTreasuryBalance(ethers.utils.formatEther(bal));
+          } catch (e2) {
+            console.error('Treasury balance error:', e2);
+            setTreasuryBalance('0');
+          }
         }
       }
     } catch (error) {
