@@ -1,0 +1,5 @@
+# Do not commit local environment files
+.env.local
+
+# Next.js build artifacts (already likely ignored at repo root, but safe here too)
+.next/

@@ -1,0 +1,9 @@
+{
+  "name": "vc-dao-demo-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy:hardhat": "npx hardhat run --network coston ./scripts/deploy-template.js",
+    "update-addresses": "node ./scripts/update-addresses.js"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "coston": {
+    "token": "0x46715a08617f8953C66D6f5BfcEFB32810623a4e",
+    "treasury": "0x7F388c16B5e5c673387693C420638A6127692051",
+    "governor": "0x4cE95116861B27B518d14c1688f99AC945dBb6e1"
+  },
+  "hardhat": {
+    "token": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+    "treasury": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "governor": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
+  },
+  "meta": {
+    "network": "hardhat",
+    "rpcHint": "Set RPC via environment variable (REACT_APP_RPC or VITE_RPC_URL) if the app requires a custom RPC",
+    "run": "cd d:\\BlockChain\\VC-DAO-DEMO\\vc-dao-demo\\frontend && npm install && npm start (or npm run dev)",
+    "devServer": "http://localhost:3000",
+    "note": "Updating this file only changes frontend pointers; to reset token/votes modify contracts on-chain (call admin or redeploy).",
+    "autoUpdate": "Use scripts/update-addresses.js to overwrite token/treasury/governor after deployment."
+  }
+}
